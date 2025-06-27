@@ -1,9 +1,15 @@
+# The following packages are required for your Streamlit chatbot app
 asyncio==3.4.3
 aiohttp==3.8.6
 streamlit==1.28.0
 python-docx==0.8.11
 PyPDF2==3.0.1
+# pdf2image and pytesseract require system binaries not available on Streamlit Cloud, but kept for local use
 pdf2image==1.16.3
 pytesseract==0.3.10
+# SpeechRecognition requires system binaries not available on Streamlit Cloud, but kept for local use
 SpeechRecognition==3.10.0
 audio_recorder_streamlit==0.0.6
+pillow==10.2.0  # Required for pdf2image and image handling
+# opencv-python==4.9.0.80  # Optional: for advanced video/image processing
+# Remove or comment out unused or system-dependent packages for Streamlit Cloud

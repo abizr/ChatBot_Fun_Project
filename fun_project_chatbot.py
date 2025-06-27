@@ -7,7 +7,6 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 import pytesseract
 import speech_recognition as sr
-#from AudioRecorder import AudioRecorder
 from audio_recorder_streamlit import audio_recorder as audiorecorder
 
 # ---------------------------
@@ -33,36 +32,24 @@ def extract_text_from_docx(file_bytes):
     return "\n".join(full_text)
 
 def extract_text_from_pdf_with_ocr(file_bytes):
-    # Convert PDF pages to images and perform OCR to extract text
-    # This is useful for scanned PDFs where text extraction fails
-    images = convert_from_bytes(file_bytes)
-    text = ""
-    for image in images:
-        text += pytesseract.image_to_string(image)
-    return text
+    # OCR is not available on Streamlit Cloud due to missing system binaries
+    st.warning("OCR for scanned PDFs is not available on Streamlit Cloud. Please use a PDF with selectable text.")
+    return ""
 
 # ---------------------------
 # Speech-to-text function using speech_recognition
 # ---------------------------
 
 def speech_to_text(audio_data):
-    # Convert recorded audio data to text using Google's speech recognition
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(io.BytesIO(audio_data)) as source:
-        audio = recognizer.record(source)
-    try:
-        text = recognizer.recognize_google(audio)
-    except sr.UnknownValueError:
-        text = ""
-    except sr.RequestError:
-        text = ""
-    return text
+    # Speech-to-text is not available on Streamlit Cloud due to missing system binaries
+    st.warning("Speech-to-text is not available on Streamlit Cloud. Please type your message instead.")
+    return ""
 
 # ---------------------------
 # Asynchronous function to call OpenRouter API
 # ---------------------------
 
-async def call_openrouter_api(messages, model, api_key):
+async def call_openrouter_api(messages, model, api_key, max_tokens=512):
     # Asynchronously send chat messages to OpenRouter API and get response
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -71,7 +58,8 @@ async def call_openrouter_api(messages, model, api_key):
     }
     payload = {
         "model": model,
-        "messages": messages
+        "messages": messages,
+        "max_tokens": max_tokens
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers) as resp:
@@ -80,6 +68,9 @@ async def call_openrouter_api(messages, model, api_key):
                 return data['choices'][0]['message']['content']
             else:
                 error_message = await resp.text()
+                # User-friendly error for 402
+                if resp.status == 402:
+                    return "Error: Insufficient credits or request too large. Please reduce your message size or upgrade your OpenRouter account."
                 return f"Error: {resp.status}, Message: {error_message}"
 
      
@@ -166,7 +157,7 @@ with st.sidebar:
     api_key = st.text_input("OpenRouter API Key", type="password")
     model = st.selectbox(
         "Select AI Model",
-        options=["gpt-3.5-turbo", "gpt-4", "anthropic/claude-2"],
+        options=["gpt-4", "anthropic/claude-2"],
         index=0
     )
     st.markdown("---")
@@ -174,6 +165,11 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload PDF or DOCX file", type=["pdf", "docx"])
     st.markdown("### Record your voice message")
     audio_bytes = audiorecorder("Start Recording", "Stop Recording")
+    st.markdown("---")
+    # New: Image & Video Upload Section
+    st.header("Image & Video Upload")
+    uploaded_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg", "bmp", "gif"], key="image_uploader")
+    uploaded_video = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "webm"], key="video_uploader")
     st.markdown("---")
     if st.button("Clear Chat History"):
         st.session_state.chat_history = []
@@ -262,6 +258,14 @@ if audio_bytes:
     else:
         st.markdown("**Could not transcribe audio. Please try again or type your message.**")
 
+# Display preview of uploaded image or video
+if uploaded_image is not None:
+    st.markdown("<b>Image Preview:</b>", unsafe_allow_html=True)
+    st.image(uploaded_image, use_column_width=True)
+if uploaded_video is not None:
+    st.markdown("<b>Video Preview:</b>", unsafe_allow_html=True)
+    st.video(uploaded_video)
+
 # Show a spinner while waiting for a response
 if st.session_state.get("internal_pending_user_input"):
     with st.spinner("AI is thinking..."):
@@ -286,7 +290,7 @@ if st.session_state.get("internal_pending_user_input"):
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-            response = loop.run_until_complete(call_openrouter_api(messages, model, api_key))
+            response = loop.run_until_complete(call_openrouter_api(messages, model, api_key, max_tokens=512))
 
             # Update chat history with user input and bot response
             st.session_state.chat_history.append({"role": "user", "content": user_input})
