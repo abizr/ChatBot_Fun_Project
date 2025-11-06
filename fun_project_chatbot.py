@@ -157,7 +157,7 @@ with st.sidebar:
     api_key = st.text_input("OpenRouter API Key", type="password")
     model = st.selectbox(
         "Select AI Model",
-        options=["gpt-4", "anthropic/claude-2"],
+        options=["gpt-4", "anthropic/claude-2", "deepseek/deepseek-chat-v3-0324:free", "qwen/qwen3-235b-a22b:free"],
         index=0
     )
     st.markdown("---")

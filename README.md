@@ -44,6 +44,34 @@ export OPENROUTER_API_KEY="your_api_key_here"  # On Windows use: set OPENROUTER_
 python fun_project_chatbot.py --help <br>
 11.	This should display usage information without errors. <br>
 
+## Streamlit Cloud Deployment (Recommended)
+Follow these steps to deploy a public app directly from GitHub:
+
+- Repo files required:
+  - `requirements.txt` (Python deps; do NOT include `asyncio` — it’s part of Python)
+  - `runtime.txt` with `3.10` to match your local Python version
+  - `packages.txt` (optional) with `tesseract-ocr`, `poppler-utils`, and `ffmpeg` if you want OCR/audio features
+
+- Create app in Streamlit Cloud:
+  - Connect your GitHub repo and branch
+  - Main file path: `fun_project_chatbot.py`
+  - Python version: picked from `runtime.txt`
+  - Secrets: add `OPENROUTER_API_KEY`
+
+- First deploy may take a few minutes while dependencies install.
+
+### Troubleshooting Installer Errors
+If you see “Installer returned a non-zero exit code” during deployment:
+
+- Remove `asyncio` from `requirements.txt` (it’s a stdlib module; backports break on Python 3.10+)
+- Ensure your repo contains `runtime.txt` with `3.10`
+- If you enabled OCR, make sure `packages.txt` includes `tesseract-ocr` and `poppler-utils`
+- Open the app logs in Streamlit Cloud to see the specific package that failed to install
+
+### OCR and Speech Notes
+- OCR for scanned PDFs requires system binaries. With `packages.txt` (above), the app will automatically use OCR when available; otherwise it falls back gracefully.
+- Speech-to-text attempts basic recognition from WAV bytes using `SpeechRecognition`. If the audio format or system tools are missing, the app will show a friendly message and continue normally.
+
 ## Usage Guidelines <br>
 The AI Fun Chatbot is designed for ease of use, allowing users to interact with the AI through a web interface powered by Streamlit. Below are comprehensive instructions on how to use the application effectively.
 Launching the Application <br>
