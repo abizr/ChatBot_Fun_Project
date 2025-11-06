@@ -1,7 +1,3 @@
-# Optional system packages for OCR/PDF/audio processing on Streamlit Cloud
-# If you want OCR for scanned PDFs and PDF-to-image conversion, keep these:
 tesseract-ocr
 poppler-utils
-
-# If you want to process or transcode audio (e.g., with pydub/ffmpeg-based flows):
 ffmpeg
