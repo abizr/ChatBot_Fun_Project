@@ -1,94 +1,95 @@
-import asyncio
-import aiohttp
-import streamlit as st
 import io
-from docx import Document
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_bytes
-import pytesseract
+
 import speech_recognition as sr
+import streamlit as st
 from audio_recorder_streamlit import audio_recorder as audiorecorder
 
-# ---------------------------
-# Helper functions for document processing
-# ---------------------------
+from core import DocumentIngestor, OpenRouterClient, OpenRouterError, RagConfig, RagPipeline
+from core.utils import run_async, truncate_text
 
-def extract_text_from_pdf(file_bytes):
-    # Extract text directly from PDF file bytes
-    # This function reads the PDF and extracts text from each page
-    reader = PdfReader(io.BytesIO(file_bytes))
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text
+# ---------------------------------------------------------------------------
+# Global services & configuration
+# ---------------------------------------------------------------------------
 
-def extract_text_from_docx(file_bytes):
-    # Extract text from DOCX file bytes
-    # This function loads the DOCX document and concatenates all paragraphs
-    doc = Document(io.BytesIO(file_bytes))
-    full_text = []
-    for para in doc.paragraphs:
-        full_text.append(para.text)
-    return "\n".join(full_text)
+DOCUMENT_INGESTOR = DocumentIngestor(chunk_size=640, chunk_overlap=160)
+RAG_PIPELINE = RagPipeline(config=RagConfig(top_k=4, max_context_chars=2200))
 
-def extract_text_from_pdf_with_ocr(file_bytes):
-    # OCR is not available on Streamlit Cloud due to missing system binaries
-    st.warning("OCR for scanned PDFs is not available on Streamlit Cloud. Please use a PDF with selectable text.")
+recognizer = sr.Recognizer()
+recognizer.dynamic_energy_threshold = True
+
+
+def speech_to_text(audio_data, language="en-US"):
+    """
+    Convert microphone recordings (WAV bytes) to text via Google's free API.
+    """
+    if not audio_data:
+        return ""
+
+    audio_bytes = audio_data if isinstance(audio_data, (bytes, bytearray)) else audio_data.tobytes()
+    buffer = io.BytesIO(audio_bytes)
+    try:
+        with sr.AudioFile(buffer) as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.2)
+            audio = recognizer.record(source)
+    except Exception as exc:
+        st.error(f"Could not read audio stream: {exc}")
+        return ""
+
+    try:
+        return recognizer.recognize_google(audio, language=language)
+    except sr.UnknownValueError:
+        st.warning("Sorry, I could not understand that audio. Please try again or reduce background noise.")
+    except sr.RequestError as exc:
+        st.error(f"Speech-to-text service is unavailable: {exc}")
     return ""
 
-# ---------------------------
-# Speech-to-text function using speech_recognition
-# ---------------------------
 
-def speech_to_text(audio_data):
-    # Speech-to-text is not available on Streamlit Cloud due to missing system binaries
-    st.warning("Speech-to-text is not available on Streamlit Cloud. Please type your message instead.")
-    return ""
+def ingest_document(uploaded_file):
+    """Parse uploaded files, create FAISS index, and store diagnostics in session state."""
+    file_bytes = uploaded_file.getvalue()
+    doc_id = RAG_PIPELINE.make_doc_id(file_bytes, uploaded_file.name)
+    state = st.session_state
 
-# ---------------------------
-# Asynchronous function to call OpenRouter API
-# ---------------------------
+    if state.get("active_doc_id") == doc_id and state.get("doc_bundle"):
+        return state["doc_bundle"].text
 
-async def call_openrouter_api(messages, model, api_key, max_tokens=512):
-    # Asynchronously send chat messages to OpenRouter API and get response
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data['choices'][0]['message']['content']
-            else:
-                error_message = await resp.text()
-                # User-friendly error for 402
-                if resp.status == 402:
-                    return "Error: Insufficient credits or request too large. Please reduce your message size or upgrade your OpenRouter account."
-                return f"Error: {resp.status}, Message: {error_message}"
+    try:
+        bundle = DOCUMENT_INGESTOR.ingest(uploaded_file.name, file_bytes)
+        state["doc_bundle"] = bundle
+        state["active_doc_id"] = doc_id
+        state["doc_error"] = None
+        state["doc_ingest_messages"] = bundle.diagnostics or ["Document ingested successfully."]
+        state["rag_ready"] = False
 
-     
+        if bundle.chunks:
+            RAG_PIPELINE.upsert(doc_id, bundle.chunks, metadata={"file_name": uploaded_file.name})
+            state["rag_ready"] = True
+            state["doc_ingest_messages"].append(f"Indexed {len(bundle.chunks)} chunks for retrieval.")
+        else:
+            state["doc_ingest_messages"].append("Document contained no readable text; retrieval disabled.")
+    except Exception as exc:
+        state["doc_bundle"] = None
+        state["doc_error"] = str(exc)
+        state["doc_ingest_messages"] = [f"Document ingestion failed: {exc}"]
+        state["active_doc_id"] = None
+        state["rag_ready"] = False
 
-# ---------------------------
-# Streamlit UI and main logic
-# ---------------------------
+    return state["doc_bundle"].text if state.get("doc_bundle") else ""
 
-# Set page configuration with modern UI elements
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
 st.set_page_config(
     page_title="AI Fun Chatbot",
     page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Load Google Fonts and custom CSS for modern styling
-st.markdown("""
+st.markdown(
+    """
     <link href="https://fonts.googleapis.com/css2?family=Roboto&display=swap" rel="stylesheet">
     <style>
         body {
@@ -135,21 +136,42 @@ st.markdown("""
             font-size: 0.9rem;
         }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# Header with branding and description
-st.markdown("""
+st.markdown(
+    """
     <div style="text-align:center; margin-bottom: 1.5rem;">
         <h1 style="margin-bottom:0.2rem;">🤖 AI Fun Chatbot</h1>
-        <p style="color:#555; font-size:1.1rem; margin-top:0;">Chat with AI, upload documents, or use your voice. Powered by OpenRouter.</p>
+        <p style="color:#555; font-size:1.1rem; margin-top:0;">Chat with AI, upload documents, or use your voice. Now powered by FAISS RAG.</p>
     </div>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# Initialize session state for chat history
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
 
-# Sidebar for settings and inputs
+# ---------------------------------------------------------------------------
+# Session state defaults
+# ---------------------------------------------------------------------------
+
+default_state = {
+    "chat_history": [],
+    "internal_pending_user_input": None,
+    "doc_bundle": None,
+    "doc_error": None,
+    "doc_ingest_messages": [],
+    "active_doc_id": None,
+    "rag_ready": False,
+}
+for key, value in default_state.items():
+    st.session_state.setdefault(key, value)
+
+
+# ---------------------------------------------------------------------------
+# Sidebar controls
+# ---------------------------------------------------------------------------
+
 with st.sidebar:
     st.title("Settings & Inputs")
     st.markdown("---")
@@ -157,63 +179,100 @@ with st.sidebar:
     api_key = st.text_input("OpenRouter API Key", type="password")
     model = st.selectbox(
         "Select AI Model",
-        options=["gpt-4", "anthropic/claude-2", "deepseek/deepseek-chat-v3-0324:free", "qwen/qwen3-235b-a22b:free"],
-        index=0
+        options=[
+            "gpt-4",
+            "anthropic/claude-2",
+            "deepseek/deepseek-chat-v3-0324:free",
+            "qwen/qwen3-235b-a22b:free",
+        ],
+        index=0,
     )
     st.markdown("---")
     st.header("Document & Voice")
     uploaded_file = st.file_uploader("Upload PDF or DOCX file", type=["pdf", "docx"])
-    st.markdown("### Record your voice message")
     audio_bytes = audiorecorder("Start Recording", "Stop Recording")
-    st.markdown("---")
-    # New: Image & Video Upload Section
-    st.header("Image & Video Upload")
-    uploaded_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg", "bmp", "gif"], key="image_uploader")
-    uploaded_video = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "webm"], key="video_uploader")
-    st.markdown("---")
+    st.markdown("### Image & Video Upload")
+    uploaded_image = st.file_uploader(
+        "Upload an image", type=["png", "jpg", "jpeg", "bmp", "gif"], key="image_uploader"
+    )
+    uploaded_video = st.file_uploader(
+        "Upload a video", type=["mp4", "mov", "avi", "webm"], key="video_uploader"
+    )
+
     if st.button("Clear Chat History"):
         st.session_state.chat_history = []
+
+    if uploaded_file is None and st.session_state.get("doc_bundle"):
+        if st.button("Remove cached document"):
+            st.session_state["doc_bundle"] = None
+            st.session_state["doc_error"] = None
+            st.session_state["doc_ingest_messages"] = []
+            st.session_state["active_doc_id"] = None
+            st.session_state["rag_ready"] = False
+
+    if uploaded_file is not None:
+        if st.session_state.get("doc_error"):
+            st.error(f"Document error: {st.session_state['doc_error']}")
+        else:
+            bundle = st.session_state.get("doc_bundle")
+            if bundle:
+                st.success(
+                    f"Chunks ready: {bundle.metadata.get('num_chunks', 0)} "
+                    f"(Context {'enabled' if st.session_state.get('rag_ready') else 'pending'})"
+                )
+
     st.markdown("---")
-    # Replace st.info with styled st.markdown for HTML info box
-    st.markdown("""
-    <div style="background-color:#e8f0fe; border-left:4px solid #4285f4; padding:1em; border-radius:6px; margin-bottom:1em;">
-    <b>How to use:</b><br>
-    - Type or record your message.<br>
-    - Upload a document for context.<br>
-    - Your chat history is private and local.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div style="background-color:#e8f0fe; border-left:4px solid #4285f4; padding:1em; border-radius:6px; margin-bottom:1em;">
+        <b>How to use:</b><br>
+        - Type or record your message.<br>
+        - Upload a document for retrieval-augmented answers.<br>
+        - Chat history stays local.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.markdown("<small>Made with ❤️ using Streamlit</small>", unsafe_allow_html=True)
 
-# Extract text from uploaded file if any
+
+# ---------------------------------------------------------------------------
+# Document ingestion + diagnostics
+# ---------------------------------------------------------------------------
+
 file_text = ""
 if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
-    if uploaded_file.type == "application/pdf":
-        # Try direct text extraction first
-        file_text = extract_text_from_pdf(file_bytes)
-        if not file_text.strip():
-            # If no text found, use OCR
-            file_text = extract_text_from_pdf_with_ocr(file_bytes)
-    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        file_text = extract_text_from_docx(file_bytes)
+    file_text = ingest_document(uploaded_file)
+elif st.session_state.get("doc_bundle"):
+    file_text = st.session_state["doc_bundle"].text
 
-# Display main chat container (scrollable)
+doc_error = st.session_state.get("doc_error")
+doc_messages = st.session_state.get("doc_ingest_messages", [])
+if doc_error:
+    st.error(f"Document upload failed: {doc_error}")
+elif doc_messages and st.session_state.get("doc_bundle"):
+    with st.expander("Document ingestion details", expanded=False):
+        for msg in doc_messages:
+            st.write(f"- {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Chat transcript
+# ---------------------------------------------------------------------------
+
 st.markdown('<div class="chat-container" style="max-height: 60vh; overflow-y: auto;">', unsafe_allow_html=True)
-
-# Display chat history with styled chat bubbles and separator
 for i, chat in enumerate(st.session_state.chat_history):
-    if chat["role"] == "user":
-        st.markdown(f'<div class="chat-message user-message">{chat["content"]}</div>', unsafe_allow_html=True)
-    elif chat["role"] == "assistant":
-        st.markdown(f'<div class="chat-message bot-message">{chat["content"]}</div>', unsafe_allow_html=True)
-    # Add a subtle separator after each message pair
+    role_class = "user-message" if chat["role"] == "user" else "bot-message"
+    st.markdown(f'<div class="chat-message {role_class}">{chat["content"]}</div>', unsafe_allow_html=True)
     if i < len(st.session_state.chat_history) - 1:
         st.markdown('<hr style="border: none; border-top: 1px solid #eee; margin: 8px 0;" />', unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown('</div>', unsafe_allow_html=True)
 
-# Chat input for user message (requires Streamlit >=1.25)
+# ---------------------------------------------------------------------------
+# Chat input
+# ---------------------------------------------------------------------------
+
 if "internal_pending_user_input" not in st.session_state:
     st.session_state["internal_pending_user_input"] = None
 
@@ -245,20 +304,27 @@ else:
         fallback_input = st.text_input("Type your message here...", key="pending_user_input")
         if fallback_input:
             st.session_state["internal_pending_user_input"] = fallback_input
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-# If audio recorded, convert to text
+
+# ---------------------------------------------------------------------------
+# Speech-to-text
+# ---------------------------------------------------------------------------
+
 if audio_bytes:
-    audio_data = audio_bytes.tobytes()
     st.markdown("**Transcribing audio...**")
-    transcribed_text = speech_to_text(audio_data)
+    transcribed_text = speech_to_text(audio_bytes)
     if transcribed_text:
         st.markdown(f"**You said:** {transcribed_text}")
         st.session_state["internal_pending_user_input"] = transcribed_text
     else:
         st.markdown("**Could not transcribe audio. Please try again or type your message.**")
 
-# Display preview of uploaded image or video
+
+# ---------------------------------------------------------------------------
+# Media previews
+# ---------------------------------------------------------------------------
+
 if uploaded_image is not None:
     st.markdown("<b>Image Preview:</b>", unsafe_allow_html=True)
     st.image(uploaded_image, use_column_width=True)
@@ -266,38 +332,64 @@ if uploaded_video is not None:
     st.markdown("<b>Video Preview:</b>", unsafe_allow_html=True)
     st.video(uploaded_video)
 
-# Show a spinner while waiting for a response
+
+# ---------------------------------------------------------------------------
+# LLM call with RAG context
+# ---------------------------------------------------------------------------
+
 if st.session_state.get("internal_pending_user_input"):
     with st.spinner("AI is thinking..."):
-        user_input = st.session_state["internal_pending_user_input"]
+        pending_user_input = st.session_state["internal_pending_user_input"]
         if not api_key:
             st.error("Please enter your OpenRouter API key in the sidebar.")
         else:
-            # Prepare messages for API call
-            messages = []
-            # Add system prompt with file context if available
-            if file_text.strip():
-                messages.append({"role": "system", "content": f"Context from uploaded document:\n{file_text}"})
-            # Add chat history
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are AI Fun Chatbot. Keep answers concise, friendly, and cite document snippets when used.",
+                }
+            ]
+
+            rag_context = ""
+            doc_id = st.session_state.get("active_doc_id")
+            if doc_id and st.session_state.get("rag_ready"):
+                rag_context = RAG_PIPELINE.build_context_prompt(
+                    pending_user_input,
+                    doc_id=doc_id,
+                    top_k=RAG_PIPELINE.config.top_k,
+                )
+            elif file_text:
+                rag_context = f"Document context (fallback):\n{truncate_text(file_text, max_chars=1800)}"
+
+            if rag_context:
+                messages.append({"role": "system", "content": rag_context})
+
             for chat in st.session_state.chat_history:
                 messages.append({"role": chat["role"], "content": chat["content"]})
-            # Add current user input
-            messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "user", "content": pending_user_input})
 
-            # Call OpenRouter API asynchronously and get response
             try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            response = loop.run_until_complete(call_openrouter_api(messages, model, api_key, max_tokens=512))
+                client = OpenRouterClient(api_key=api_key, model=model)
+                response = run_async(client.chat(messages, max_tokens=512))
+            except OpenRouterError as exc:
+                response = f"Error: {exc}"
+            except Exception as exc:
+                response = f"Unexpected error talking to OpenRouter: {exc}"
 
-            # Update chat history with user input and bot response
-            st.session_state.chat_history.append({"role": "user", "content": user_input})
+            st.session_state.chat_history.append({"role": "user", "content": pending_user_input})
             st.session_state.chat_history.append({"role": "assistant", "content": response})
-        # Clear pending input so it doesn't get processed again
+
         st.session_state["internal_pending_user_input"] = None
         st.rerun()
 
+
+# ---------------------------------------------------------------------------
 # Footer
-st.markdown('<div class="footer" style="background:#f0f2f6; padding:1rem 0; border-radius:8px;">Developer by Abizar Al Gifari Rahman 😎 &copy; 2025</div>', unsafe_allow_html=True)
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    '<div class="footer" style="background:#f0f2f6; padding:1rem 0; border-radius:8px;">'
+    "Developer by Abizar Al Gifari Rahman 😎 © 2025"
+    "</div>",
+    unsafe_allow_html=True,
+)

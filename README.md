@@ -15,8 +15,39 @@ Table of Contents: <br>
 
 ## Project Overview
 The AI Fun Chatbot is an innovative Streamlit-based application designed to provide an interactive AI chatbot experience enriched with advanced document processing and speech-to-text capabilities. This project integrates multiple cutting-edge technologies to allow users to interact with an AI assistant that can understand and process various document formats such as PDF and DOCX, as well as convert spoken audio into text for seamless communication.
-This chatbot leverages asynchronous API calls to OpenRouter’s AI models, enabling real-time, intelligent conversations. It supports direct text extraction from documents, optical character recognition (OCR) for scanned PDFs, and speech recognition for audio inputs, making it a versatile tool for users who want to interact with AI in multiple modalities. The application is built with a modern, user-friendly interface using Streamlit, enhanced with custom styling and Google Fonts for an appealing visual experience.<br>
+This chatbot leverages asynchronous API calls to OpenRouter's AI models, enabling real-time, intelligent conversations. It supports direct text extraction from documents, optical character recognition (OCR) for scanned PDFs, and speech recognition for audio inputs, making it a versatile tool for users who want to interact with AI in multiple modalities. The application is built with a modern, user-friendly interface using Streamlit, enhanced with custom styling and Google Fonts for an appealing visual experience.<br>
 The project is ideal for developers, researchers, and enthusiasts interested in AI-driven conversational agents, document analysis, and speech processing technologies. It serves as a comprehensive example of integrating various Python libraries and APIs to create a sophisticated, multi-functional chatbot application.<br>
+
+## Refactored Project Architecture
+- `fun_project_chatbot.py` now focuses purely on Streamlit UI + orchestration.
+- `core/doc_ingest.py` wraps PDF/DOCX parsing, OCR fallbacks, and text chunking (640 token windows with 160-token overlaps).
+- `core/rag.py` persists chunks + embeddings into `data/rag_cache/` using FAISS + NumPy so context survives reruns.
+- `core/llm_client.py` centralizes OpenRouter calls with friendly error handling.
+- `core/utils.py` contains shared helpers (token chunker, hashing, async runner).
+
+```
+chatbot_project/
+├─ fun_project_chatbot.py         # Streamlit experience + prompt assembly
+├─ core/
+│  ├─ doc_ingest.py               # Upload parsing + OCR diagnostics
+│  ├─ rag.py                      # FAISS index management + context windows
+│  ├─ llm_client.py               # OpenRouter wrapper (async)
+│  ├─ utils.py                    # common helpers
+│  └─ __init__.py
+└─ data/rag_cache/                # auto-created FAISS + metadata artifacts
+```
+
+## Minimal FAISS RAG workflow
+1. **Document upload:** `DocumentIngestor` extracts native PDF/DOCX text and only triggers OCR when selectable text is missing. Missing Poppler/Tesseract binaries are reported but no longer crash the app.
+2. **Chunking:** Extracted text is split into ~640-token chunks with 160-token overlap (tiktoken when available, word fallback otherwise) to preserve context continuity.
+3. **Embedding + storage:** `RagPipeline` encodes chunks via `sentence-transformers` (`all-MiniLM-L6-v2`), saves the FAISS index (`index.faiss`), embeddings (`embeddings.npy`), and metadata (`metadata.json`) under a stable hash of the file bytes.
+4. **Retrieval:** For every user turn we fetch the top-k (default 4) chunks, build a bounded context window (~2.2k chars), and append it as a lightweight system message—keeping the base system prompt small.
+5. **Fallback:** If FAISS/embeddings are unavailable, the chatbot falls back to a truncated plain-text context so responses still work (just without semantic search quality).
+
+## Document upload & OCR troubleshooting
+- Live ingestion diagnostics are surfaced via an expandable panel in the main UI and via sidebar badges (success/error).
+- Common failure cases (missing poppler binaries, pytesseract not installed, zero-text PDFs) are captured without throwing, ensuring uploads always complete.
+- To enable OCR on Streamlit Cloud ensure `packages.txt` lists `tesseract-ocr` and `poppler-utils`, or disable OCR via `DocumentIngestor(enable_ocr=False)` if your deployment cannot install system packages.
 
 ## Installation Instructions<br>
 To get started with the AI Fun Chatbot, follow these detailed installation steps to set up the environment and dependencies required for the application to run smoothly.<br>
@@ -95,6 +126,7 @@ Interacting with the Chatbot <br>
 The AI Fun Chatbot boasts a rich set of features that combine to deliver a powerful and flexible AI interaction platform:<br>
 ●	Multi-Modal Input Support: Accepts text, document uploads (PDF and DOCX), and audio recordings.<br>
 ●	Document Text Extraction: Extracts text from PDFs and DOCX files using native parsing and OCR for scanned documents.<br>
+●	Retrieval-Augmented Responses: Automatically indexes uploaded files with FAISS + sentence-transformers and injects top-k snippets into every LLM call.<br>
 ●	Speech-to-Text Conversion: Converts recorded audio into text using Google’s speech recognition API.<br>
 ●	Asynchronous API Calls: Utilizes asynchronous HTTP requests to OpenRouter’s API for efficient and responsive AI interactions.<br>
 ●	Customizable AI Models: Supports multiple AI models selectable by the user to tailor chatbot responses.<br>
@@ -104,18 +136,15 @@ The AI Fun Chatbot boasts a rich set of features that combine to deliver a power
 ●	Open Source and Extensible: Built with popular Python libraries, making it easy to extend and customize.<br>
 
 ## Required Dependencies
-The project relies on several Python libraries to implement its diverse functionalities. Below is a detailed list of required dependencies, which are also included in the requirements.txt file:<br>
-●	asyncio: For asynchronous programming and managing concurrent API calls.<br>
-●	aiohttp: To perform asynchronous HTTP requests to the OpenRouter API.<br>
-●	streamlit: The web framework used to build the interactive UI.<br>
-●	io: For handling in-memory byte streams, especially for file processing.<br>
-●	python-docx: To parse and extract text from DOCX files.<br>
-●	PyPDF2: For reading and extracting text from PDF documents.<br>
-●	pdf2image: Converts PDF pages into images for OCR processing.<br>
-●	pytesseract: Python wrapper for Tesseract OCR engine to extract text from images.<br>
-●	speech_recognition: To convert audio recordings into text using speech recognition APIs.<br>
-●	audio_recorder_streamlit: Streamlit component for recording audio directly in the browser.<br>
-Ensure all these packages are installed to guarantee full functionality of the chatbot.<br>
+All Python dependencies live in `requirements.txt`, but the most important ones are listed below so you can validate Streamlit Cloud installs everything you need:<br>
+●	streamlit: Main UI framework.<br>
+●	aiohttp: Async HTTP client used by the OpenRouter wrapper.<br>
+●	python-docx & PyPDF2: Native PDF/DOCX extraction.<br>
+●	pdf2image, pytesseract, Pillow: Optional OCR pipeline for scanned PDFs.<br>
+●	speech_recognition & audio_recorder_streamlit: Browser audio capture + Google STT integration.<br>
+●	sentence-transformers, faiss-cpu, numpy, tiktoken: Retrieval-augmented generation stack (chunk embeddings, FAISS index, token-aware chunking).<br>
+●	pydub & openai: Audio utilities and optional future LLM integrations.<br>
+Make sure these install without errors before deploying publicly.<br>
 
 ## Running the Application
 After completing the installation and setup, running the AI Fun Chatbot is straightforward:<br>
